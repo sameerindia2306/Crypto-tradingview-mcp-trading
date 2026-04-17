@@ -16,6 +16,7 @@ import { execSync } from "child_process";
 import http from "http";
 import { google } from "googleapis";
 import { exportToExcel } from "./export-excel.js";
+import { syncToSheets } from "./sync-sheets.js";
 
 // Health check endpoint so Railway can monitor and auto-restart if unresponsive
 http.createServer((_, res) => res.end("OK")).listen(process.env.PORT || 3000);
@@ -705,6 +706,7 @@ async function run() {
   console.log(`\nDecision log saved → ${LOG_FILE}`);
   console.log(`Tax record saved → ${CSV_FILE}`);
   await exportToExcel().catch(err => console.log(`  ⚠️  Excel export failed: ${err.message}`));
+  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets sync failed: ${err.message}`));
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 

@@ -4,7 +4,7 @@ import "dotenv/config";
 
 const SHEET_ID   = process.env.GOOGLE_SHEET_ID;
 const CREDS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || "./google-credentials.json";
-const CSV_FILE   = process.env.TRADE_LOG_PATH || "C:/Users/spathan/Desktop/trades.csv";
+const CSV_FILE   = process.env.TRADE_LOG_PATH || "trades.csv";
 const SHEET_NAME = "Trades";
 
 async function getAuth() {
