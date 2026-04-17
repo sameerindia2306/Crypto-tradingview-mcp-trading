@@ -108,13 +108,26 @@ function buildFormatRequests(sheetId, rows) {
   return requests;
 }
 
-export async function syncToSheets() {
-  const raw = readFileSync(CSV_FILE, "utf8");
-  const allRows = parseCSV(raw);
-  if (allRows.length < 2) { console.log("[Sheets] No trades to sync."); return; }
+const DEFAULT_HEADERS = [
+  "Date","Time (UTC)","Exchange","Symbol","Side","Quantity",
+  "Entry Price","Total USD","Fee (est.)","Net Amount","Order ID",
+  "Mode","Status","Exit Price","Exit Time","P&L USD","P&L %","Notes",
+];
 
-  const headers  = allRows[0];
-  const dataRows = allRows.slice(1);
+export async function syncToSheets() {
+  let headers = DEFAULT_HEADERS;
+  let dataRows = [];
+
+  try {
+    const raw = readFileSync(CSV_FILE, "utf8");
+    const allRows = parseCSV(raw);
+    if (allRows.length >= 1) headers  = allRows[0];
+    if (allRows.length >= 2) dataRows = allRows.slice(1);
+  } catch {
+    console.log("[Sheets] CSV not found — writing headers only.");
+  }
+
+  const allRows = [headers, ...dataRows];
 
   // Group by category
   const byCategory = { CRYPTO: [], FOREX: [], GOLD: [], TECH: [] };
