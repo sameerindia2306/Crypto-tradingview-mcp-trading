@@ -6,6 +6,16 @@ const SHEET_ID   = process.env.GOOGLE_SHEET_ID;
 const CREDS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || "./google-credentials.json";
 const CSV_FILE   = process.env.TRADE_LOG_PATH || "trades.csv";
 
+const TABS = ["All Trades", "CRYPTO", "FOREX", "GOLD", "TECH"];
+
+function getCategory(symbol) {
+  const s = (symbol || "").toUpperCase().trim();
+  if (s === "XAUUSD" || s === "XAUUSDT") return "GOLD";
+  if (/USDT$|USDC$|BUSD$/.test(s))       return "CRYPTO";
+  if (/^[A-Z]{6}$/.test(s))              return "FOREX";
+  return "TECH";
+}
+
 async function getAuth() {
   let creds;
   if (process.env.GOOGLE_CREDENTIALS_B64) {
@@ -35,21 +45,15 @@ function parseCSV(raw) {
 }
 
 function buildFormatRequests(sheetId, rows) {
-  const colorMap = {
-    BLOCKED: { red: 0.835, green: 0.000, blue: 0.000 },
-    OPEN:    { red: 0.000, green: 0.784, blue: 0.325 },
-    WIN:     { red: 1.000, green: 0.839, blue: 0.000 },
-    LOSS:    { red: 1.000, green: 0.427, blue: 0.000 },
-  };
-
   const requests = [];
 
+  // Blue header
   requests.push({
     repeatCell: {
       range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
       cell: {
         userEnteredFormat: {
-          backgroundColor: { red: 0.082, green: 0.396, blue: 0.753 },
+          backgroundColor: { red: 0.082, green: 0.396, blue: 0.753 }, // #1565C0
           textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
           horizontalAlignment: "CENTER",
         },
@@ -58,12 +62,20 @@ function buildFormatRequests(sheetId, rows) {
     },
   });
 
+  // Freeze header
   requests.push({
     updateSheetProperties: {
       properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
       fields: "gridProperties.frozenRowCount",
     },
   });
+
+  const colorMap = {
+    OPEN:    { red: 0.204, green: 0.659, blue: 0.325 }, // green
+    BLOCKED: { red: 0.831, green: 0.000, blue: 0.000 }, // red
+    WIN:     { red: 1.000, green: 0.839, blue: 0.000 }, // gold
+    LOSS:    { red: 1.000, green: 0.427, blue: 0.000 }, // orange
+  };
 
   for (let i = 1; i < rows.length; i++) {
     const status = (rows[i][12] || "").toUpperCase();
@@ -76,7 +88,7 @@ function buildFormatRequests(sheetId, rows) {
           userEnteredFormat: {
             backgroundColor: color,
             textFormat: {
-              foregroundColor: status === "BLOCKED"
+              foregroundColor: (status === "BLOCKED" || status === "LOSS")
                 ? { red: 1, green: 1, blue: 1 }
                 : { red: 0, green: 0, blue: 0 },
             },
@@ -89,30 +101,11 @@ function buildFormatRequests(sheetId, rows) {
 
   requests.push({
     autoResizeDimensions: {
-      dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: rows[0].length },
+      dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: (rows[0] || []).length },
     },
   });
 
   return requests;
-}
-
-async function ensureTab(sheets, spreadsheetId, tabName, existingTitles) {
-  if (!existingTitles.includes(tabName)) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
-    });
-  }
-}
-
-async function writeTab(sheets, spreadsheetId, tabName, rows) {
-  await sheets.spreadsheets.values.clear({ spreadsheetId, range: `'${tabName}'!A:Z` });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `'${tabName}'!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: rows },
-  });
 }
 
 export async function syncToSheets() {
@@ -120,47 +113,60 @@ export async function syncToSheets() {
   const allRows = parseCSV(raw);
   if (allRows.length < 2) { console.log("[Sheets] No trades to sync."); return; }
 
-  const headers = allRows[0];
+  const headers  = allRows[0];
   const dataRows = allRows.slice(1);
 
-  // Group by symbol (column index 3)
-  const bySymbol = {};
+  // Group by category
+  const byCategory = { CRYPTO: [], FOREX: [], GOLD: [], TECH: [] };
   for (const row of dataRows) {
-    const sym = row[3] || "Unknown";
-    if (!bySymbol[sym]) bySymbol[sym] = [];
-    bySymbol[sym].push(row);
+    const cat = getCategory(row[3]);
+    byCategory[cat].push(row);
   }
-
-  const tabNames = ["All Trades", ...Object.keys(bySymbol).sort()];
 
   const authClient = await getAuth();
   const sheets = google.sheets({ version: "v4", auth: authClient });
 
-  // Get current tabs
+  // Ensure all tabs exist — re-fetch after each creation to avoid stale state
   let meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   let existingTitles = meta.data.sheets.map(s => s.properties.title);
 
-  // Create any missing tabs
-  for (const tab of tabNames) {
-    await ensureTab(sheets, SHEET_ID, tab, existingTitles);
-    existingTitles = [...new Set([...existingTitles, tab])];
+  for (const tab of TABS) {
+    if (!existingTitles.includes(tab)) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ addSheet: { properties: { title: tab } } }] },
+      }).catch(e => { if (!e.message?.includes("already exists")) throw e; });
+      existingTitles.push(tab);
+    }
   }
 
   // Write data to each tab
-  await writeTab(sheets, SHEET_ID, "All Trades", allRows);
-  for (const [sym, rows] of Object.entries(bySymbol).sort()) {
-    await writeTab(sheets, SHEET_ID, sym, [headers, ...rows]);
+  const tabData = {
+    "All Trades": allRows,
+    CRYPTO: byCategory.CRYPTO.length ? [headers, ...byCategory.CRYPTO] : [headers],
+    FOREX:  byCategory.FOREX.length  ? [headers, ...byCategory.FOREX]  : [headers],
+    GOLD:   byCategory.GOLD.length   ? [headers, ...byCategory.GOLD]   : [headers],
+    TECH:   byCategory.TECH.length   ? [headers, ...byCategory.TECH]   : [headers],
+  };
+
+  for (const [tab, rows] of Object.entries(tabData)) {
+    await sheets.spreadsheets.values.clear({ spreadsheetId: SHEET_ID, range: `'${tab}'!A:Z` });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `'${tab}'!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: rows },
+    });
   }
 
-  // Refresh metadata for sheetIds, then format all tabs
+  // Refresh metadata for sheetIds then format all tabs at once
   meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const sheetMap = Object.fromEntries(meta.data.sheets.map(s => [s.properties.title, s.properties.sheetId]));
 
   const allRequests = [];
-  allRequests.push(...buildFormatRequests(sheetMap["All Trades"], allRows));
-  for (const [sym, rows] of Object.entries(bySymbol).sort()) {
-    if (sheetMap[sym] !== undefined) {
-      allRequests.push(...buildFormatRequests(sheetMap[sym], [headers, ...rows]));
+  for (const [tab, rows] of Object.entries(tabData)) {
+    if (sheetMap[tab] !== undefined) {
+      allRequests.push(...buildFormatRequests(sheetMap[tab], rows));
     }
   }
 
@@ -171,7 +177,8 @@ export async function syncToSheets() {
     });
   }
 
-  console.log(`[Sheets] Synced ${dataRows.length} trade(s) across ${Object.keys(bySymbol).length} symbol tabs + All Trades → https://docs.google.com/spreadsheets/d/${SHEET_ID}`);
+  const counts = Object.entries(byCategory).map(([k, v]) => `${k}:${v.length}`).join(" ");
+  console.log(`[Sheets] Synced ${dataRows.length} trade(s) → ${counts} → https://docs.google.com/spreadsheets/d/${SHEET_ID}`);
 }
 
 if (process.argv[1]?.includes("sync-sheets")) {
