@@ -288,7 +288,8 @@ function runSafetyCheck(price, ema9, ema21, vwap, rsi14) {
   }
 
   const allPass = results.every((r) => r.pass);
-  return { results, allPass };
+  const bias = bullish ? "bullish" : bearish ? "bearish" : "neutral";
+  return { results, allPass, bias };
 }
 
 // ─── Trade Limits ────────────────────────────────────────────────────────────
@@ -390,21 +391,8 @@ async function ensureSheetHeaders(sheets) {
   } catch {}
 }
 
-async function appendSheetRow(row) {
-  if (!SHEET_ID) return;
-  try {
-    const sheets = await getSheetsClient();
-    if (!sheets) return;
-    await ensureSheetHeaders(sheets);
-    const values = [row.map(v => String(v).replace(/^"|"$/g, ""))];
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:R`,
-      valueInputOption: "RAW", insertDataOption: "INSERT_ROWS",
-      requestBody: { values },
-    });
-  } catch (err) {
-    console.log(`  ⚠️  Sheets append failed: ${err.message}`);
-  }
+async function appendSheetRow(_row) {
+  // No-op — syncToSheets() rewrites all tabs at end of each cycle
 }
 
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
@@ -617,7 +605,7 @@ async function runSymbol(symbol, rules, log) {
     return;
   }
 
-  const { results, allPass } = runSafetyCheck(price, ema9, ema21, vwap, rsi14);
+  const { results, allPass, bias } = runSafetyCheck(price, ema9, ema21, vwap, rsi14);
   const tradeSize = Math.min(CONFIG.portfolioValue * 0.01, CONFIG.maxTradeSizeUSD);
 
   const logEntry = {
@@ -644,7 +632,7 @@ async function runSymbol(symbol, rules, log) {
     console.log(`  🚫 BLOCKED — ${failed.join("; ")}`);
   } else {
     console.log(`  ✅ ALL CONDITIONS MET`);
-    const side = logEntry.conditions.find(c => c.bias)?.bias === "bearish" ? "sell" : "buy";
+    const side = bias === "bearish" ? "sell" : "buy";
     const quantity = tradeSize / price;
 
     if (CONFIG.paperTrading) {
