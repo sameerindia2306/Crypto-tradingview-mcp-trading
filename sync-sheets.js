@@ -5,7 +5,6 @@ import "dotenv/config";
 const SHEET_ID   = process.env.GOOGLE_SHEET_ID;
 const CREDS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || "./google-credentials.json";
 const CSV_FILE   = process.env.TRADE_LOG_PATH || "trades.csv";
-const SHEET_NAME = "Trades";
 
 async function getAuth() {
   let creds;
@@ -22,9 +21,7 @@ async function getAuth() {
 }
 
 function parseCSV(raw) {
-  const rows = [];
-  for (const line of raw.trim().split("\n")) {
-    if (!line.trim()) continue;
+  return raw.trim().split("\n").filter(l => l.trim()).map(line => {
     const cols = [];
     let cur = "", inQ = false;
     for (const ch of line) {
@@ -33,48 +30,11 @@ function parseCSV(raw) {
       else cur += ch;
     }
     cols.push(cur);
-    rows.push(cols.map(c => c.replace(/"/g, "").trim()));
-  }
-  return rows;
+    return cols.map(c => c.replace(/"/g, "").trim());
+  });
 }
 
-export async function syncToSheets() {
-  const raw = readFileSync(CSV_FILE, "utf8");
-  const rows = parseCSV(raw);
-  if (!rows.length) return;
-
-  const authClient = await getAuth();
-  const sheets = google.sheets({ version: "v4", auth: authClient });
-
-  // Ensure sheet tab exists
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  const existing = meta.data.sheets.map(s => s.properties.title);
-
-  if (!existing.includes(SHEET_NAME)) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: SHEET_NAME } } }] },
-    });
-  }
-
-  // Clear and rewrite
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:Z`,
-  });
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: rows },
-  });
-
-  // Apply header formatting + colour coding
-  const sheetId = meta.data.sheets.find(s => s.properties.title === SHEET_NAME)?.properties.sheetId
-    ?? (await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }))
-         .data.sheets.find(s => s.properties.title === SHEET_NAME).properties.sheetId;
-
+function buildFormatRequests(sheetId, rows) {
   const colorMap = {
     BLOCKED: { red: 0.835, green: 0.000, blue: 0.000 },
     OPEN:    { red: 0.000, green: 0.784, blue: 0.325 },
@@ -84,7 +44,6 @@ export async function syncToSheets() {
 
   const requests = [];
 
-  // Bold blue header row
   requests.push({
     repeatCell: {
       range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
@@ -99,7 +58,6 @@ export async function syncToSheets() {
     },
   });
 
-  // Freeze header row
   requests.push({
     updateSheetProperties: {
       properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
@@ -107,12 +65,10 @@ export async function syncToSheets() {
     },
   });
 
-  // Colour-code data rows by Status column (index 12)
   for (let i = 1; i < rows.length; i++) {
     const status = (rows[i][12] || "").toUpperCase();
     const color = colorMap[status];
     if (!color) continue;
-    const textWhite = status === "BLOCKED";
     requests.push({
       repeatCell: {
         range: { sheetId, startRowIndex: i, endRowIndex: i + 1 },
@@ -120,7 +76,7 @@ export async function syncToSheets() {
           userEnteredFormat: {
             backgroundColor: color,
             textFormat: {
-              foregroundColor: textWhite
+              foregroundColor: status === "BLOCKED"
                 ? { red: 1, green: 1, blue: 1 }
                 : { red: 0, green: 0, blue: 0 },
             },
@@ -131,24 +87,93 @@ export async function syncToSheets() {
     });
   }
 
-  // Auto-resize all columns
   requests.push({
     autoResizeDimensions: {
       dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: rows[0].length },
     },
   });
 
-  if (requests.length) {
+  return requests;
+}
+
+async function ensureTab(sheets, spreadsheetId, tabName, existingTitles) {
+  if (!existingTitles.includes(tabName)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    });
+  }
+}
+
+async function writeTab(sheets, spreadsheetId, tabName, rows) {
+  await sheets.spreadsheets.values.clear({ spreadsheetId, range: `'${tabName}'!A:Z` });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${tabName}'!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: rows },
+  });
+}
+
+export async function syncToSheets() {
+  const raw = readFileSync(CSV_FILE, "utf8");
+  const allRows = parseCSV(raw);
+  if (allRows.length < 2) { console.log("[Sheets] No trades to sync."); return; }
+
+  const headers = allRows[0];
+  const dataRows = allRows.slice(1);
+
+  // Group by symbol (column index 3)
+  const bySymbol = {};
+  for (const row of dataRows) {
+    const sym = row[3] || "Unknown";
+    if (!bySymbol[sym]) bySymbol[sym] = [];
+    bySymbol[sym].push(row);
+  }
+
+  const tabNames = ["All Trades", ...Object.keys(bySymbol).sort()];
+
+  const authClient = await getAuth();
+  const sheets = google.sheets({ version: "v4", auth: authClient });
+
+  // Get current tabs
+  let meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  let existingTitles = meta.data.sheets.map(s => s.properties.title);
+
+  // Create any missing tabs
+  for (const tab of tabNames) {
+    await ensureTab(sheets, SHEET_ID, tab, existingTitles);
+    existingTitles = [...new Set([...existingTitles, tab])];
+  }
+
+  // Write data to each tab
+  await writeTab(sheets, SHEET_ID, "All Trades", allRows);
+  for (const [sym, rows] of Object.entries(bySymbol).sort()) {
+    await writeTab(sheets, SHEET_ID, sym, [headers, ...rows]);
+  }
+
+  // Refresh metadata for sheetIds, then format all tabs
+  meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheetMap = Object.fromEntries(meta.data.sheets.map(s => [s.properties.title, s.properties.sheetId]));
+
+  const allRequests = [];
+  allRequests.push(...buildFormatRequests(sheetMap["All Trades"], allRows));
+  for (const [sym, rows] of Object.entries(bySymbol).sort()) {
+    if (sheetMap[sym] !== undefined) {
+      allRequests.push(...buildFormatRequests(sheetMap[sym], [headers, ...rows]));
+    }
+  }
+
+  if (allRequests.length) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SHEET_ID,
-      requestBody: { requests },
+      requestBody: { requests: allRequests },
     });
   }
 
-  console.log(`[Sheets] Synced ${rows.length - 1} trade(s) → https://docs.google.com/spreadsheets/d/${SHEET_ID}`);
+  console.log(`[Sheets] Synced ${dataRows.length} trade(s) across ${Object.keys(bySymbol).length} symbol tabs + All Trades → https://docs.google.com/spreadsheets/d/${SHEET_ID}`);
 }
 
-// Run directly
 if (process.argv[1]?.includes("sync-sheets")) {
   syncToSheets().catch(console.error);
 }

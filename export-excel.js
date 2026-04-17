@@ -5,12 +5,12 @@ import "dotenv/config";
 const CSV_FILE = process.env.TRADE_LOG_PATH || "trades.csv";
 const OUT_FILE = CSV_FILE.replace(".csv", ".xlsx");
 
-const GREEN  = "FF00C853"; // open trades
-const RED    = "FFD50000"; // blocked trades
-const GOLD   = "FFFFD600"; // win
-const ORANGE = "FFFF6D00"; // loss
+const GREEN  = "FF00C853";
+const RED    = "FFD50000";
+const GOLD   = "FFFFD600";
+const ORANGE = "FFFF6D00";
 const WHITE  = "FFFFFFFF";
-const HEADER = "FF1565C0"; // header row blue
+const HEADER = "FF1565C0";
 
 const THIN_BORDER = {
   top:    { style: "thin", color: { argb: "FF999999" } },
@@ -26,26 +26,24 @@ const HEADER_BORDER = {
   right:  { style: "medium", color: { argb: WHITE } },
 };
 
-export async function exportToExcel() {
-  return main();
+function parseCSV(raw) {
+  return raw.trim().split("\n").filter(l => l.trim()).map(line => {
+    const cols = [];
+    let cur = "", inQ = false;
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { cols.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    cols.push(cur);
+    return cols.map(c => c.replace(/"/g, "").trim());
+  });
 }
 
-async function main() {
-  const raw = readFileSync(CSV_FILE, "utf8").trim().split("\n");
-  if (raw.length < 2) { console.log("No trades to export."); return; }
+function styleSheet(sheet, rows) {
+  const headers = rows[0];
+  sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 14) }));
 
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet("Trades", { views: [{ state: "frozen", ySplit: 1 }] });
-
-  // Parse headers
-  const headers = raw[0].split(",");
-  sheet.columns = headers.map(h => ({
-    header: h.replace(/"/g, ""),
-    key: h,
-    width: Math.max(h.length + 4, 14),
-  }));
-
-  // Style header row
   const headerRow = sheet.getRow(1);
   headerRow.eachCell(cell => {
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER } };
@@ -55,74 +53,88 @@ async function main() {
   });
   headerRow.height = 22;
 
-  // Add data rows with color coding
-  for (let i = 1; i < raw.length; i++) {
-    const line = raw[i];
-    if (!line.trim()) continue;
-
-    // Handle quoted fields
-    const cols = [];
-    let current = "", inQuote = false;
-    for (const ch of line) {
-      if (ch === '"') { inQuote = !inQuote; }
-      else if (ch === "," && !inQuote) { cols.push(current); current = ""; }
-      else current += ch;
-    }
-    cols.push(current);
-
-    const row = sheet.addRow(cols.map(c => c.replace(/"/g, "")));
+  for (let i = 1; i < rows.length; i++) {
+    const row = sheet.addRow(rows[i]);
     row.height = 18;
-
-    const status = (cols[12] || "").replace(/"/g, "").trim().toUpperCase();
-
+    const status = (rows[i][12] || "").toUpperCase();
     let bgColor = null;
     if (status === "BLOCKED") bgColor = RED;
     else if (status === "OPEN")    bgColor = GREEN;
     else if (status === "WIN")     bgColor = GOLD;
     else if (status === "LOSS")    bgColor = ORANGE;
 
-    if (bgColor) {
-      row.eachCell({ includeEmpty: true }, cell => {
+    row.eachCell({ includeEmpty: true }, cell => {
+      if (bgColor) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bgColor } };
         cell.font = { color: { argb: status === "BLOCKED" ? WHITE : "FF000000" } };
-        cell.alignment = { vertical: "middle" };
-        cell.border = THIN_BORDER;
-      });
-    } else {
-      row.eachCell({ includeEmpty: true }, cell => {
-        cell.alignment = { vertical: "middle" };
+      } else {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: i % 2 === 0 ? "FFF5F5F5" : WHITE } };
-        cell.border = THIN_BORDER;
-      });
-    }
+      }
+      cell.alignment = { vertical: "middle" };
+      cell.border = THIN_BORDER;
+    });
+  }
+}
+
+export async function exportToExcel() {
+  return main();
+}
+
+async function main() {
+  const raw = readFileSync(CSV_FILE, "utf8");
+  const allRows = parseCSV(raw);
+  if (allRows.length < 2) { console.log("No trades to export."); return; }
+
+  const headers = allRows[0];
+  const dataRows = allRows.slice(1);
+
+  // Group by symbol (column index 3)
+  const bySymbol = {};
+  for (const row of dataRows) {
+    const sym = row[3] || "Unknown";
+    if (!bySymbol[sym]) bySymbol[sym] = [];
+    bySymbol[sym].push(row);
   }
 
-  // Add legend sheet
+  const workbook = new ExcelJS.Workbook();
+
+  // All Trades tab
+  const allSheet = workbook.addWorksheet("All Trades", { views: [{ state: "frozen", ySplit: 1 }] });
+  styleSheet(allSheet, allRows);
+
+  // Per-symbol tabs
+  for (const [sym, rows] of Object.entries(bySymbol).sort()) {
+    const sheet = workbook.addWorksheet(sym, { views: [{ state: "frozen", ySplit: 1 }] });
+    styleSheet(sheet, [headers, ...rows]);
+  }
+
+  // Legend tab
   const legend = workbook.addWorksheet("Legend");
   legend.columns = [{ key: "col1", width: 20 }, { key: "col2", width: 30 }];
   const legendData = [
     ["Colour", "Meaning"],
-    ["🔵 Blue header", "Column labels"],
     ["🟢 Green", "OPEN — trade placed, waiting for TP/SL"],
     ["🔴 Red", "BLOCKED — conditions not met, no trade"],
     ["🟡 Gold", "WIN — take profit hit"],
     ["🟠 Orange", "LOSS — stop loss hit"],
   ];
+  const legendColors = [HEADER, GREEN, RED, GOLD, ORANGE];
+  const legendText  = [WHITE, "FF000000", WHITE, "FF000000", "FF000000"];
   legendData.forEach((r, i) => {
     const row = legend.addRow(r);
-    const colors = [HEADER, HEADER, GREEN, RED, GOLD, ORANGE];
-    const textColors = [WHITE, WHITE, "FF000000", WHITE, "FF000000", "FF000000"];
-    if (i > 0) {
-      row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: colors[i] } };
-      row.getCell(1).font = { bold: true, color: { argb: textColors[i] } };
-      row.eachCell(c => { c.border = THIN_BORDER; });
-    } else {
+    if (i === 0) {
       row.eachCell(c => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEADER } }; c.border = HEADER_BORDER; });
+    } else {
+      row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: legendColors[i] } };
+      row.getCell(1).font = { bold: true, color: { argb: legendText[i] } };
+      row.eachCell(c => { c.border = THIN_BORDER; });
     }
   });
 
   await workbook.xlsx.writeFile(OUT_FILE);
-  console.log(`✅ Exported → ${OUT_FILE}`);
+  console.log(`✅ Excel exported → ${OUT_FILE} (${Object.keys(bySymbol).length} symbol tabs + All Trades)`);
 }
 
-main().catch(console.error);
+if (process.argv[1]?.includes("export-excel")) {
+  main().catch(console.error);
+}
