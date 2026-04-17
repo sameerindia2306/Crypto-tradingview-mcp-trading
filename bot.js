@@ -163,10 +163,7 @@ function countTodaysTrades(log) {
 // Uses Binance for crypto pairs, BitGet for everything else (e.g. XAUUSDT)
 
 async function fetchCandles(symbol, interval, limit = 100) {
-  const binanceSymbols = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOTUSDT","DOGEUSDT","LINKUSDT","AVAXUSDT","POLUSDT","UNIUSDT","ATOMUSDT","LTCUSDT"];
-  if (binanceSymbols.includes(symbol)) {
-    return fetchCandlesBinance(symbol, interval, limit);
-  }
+  // BitGet used for all symbols — Binance.com is geo-blocked on Railway (US servers, 451 error)
   return fetchCandlesBitget(symbol, interval, limit);
 }
 
