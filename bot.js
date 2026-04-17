@@ -61,8 +61,71 @@ const STRATEGY_PARAMS = {
   },
 };
 
-const LOG_FILE = "safety-check-log.json";
+const LOG_FILE       = "safety-check-log.json";
 const POSITIONS_FILE = "open-positions.json";
+const WATCHLIST_FILE = "watchlist.json";
+
+// ─── Weekly Pair Scanner ──────────────────────────────────────────────────────
+
+const EXCLUDE_BASES = new Set([
+  // Stablecoins
+  "USDC","BUSD","FDUSD","TUSD","DAI","USDP","GUSD","FRAX",
+  // Commodities (not crypto)
+  "XAU","XAUT","XAG","PAXG",
+]);
+
+async function fetchTopPairs(maxPairs = 15) {
+  const url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES";
+  const res  = await fetch(url);
+  const json = await res.json();
+  if (!json.data?.length) throw new Error("BitGet tickers returned no data");
+
+  return json.data
+    .filter(t => {
+      const base   = t.symbol.replace(/USDT$/, "");
+      const vol24h = parseFloat(t.usdtVolume || 0);
+      const price  = parseFloat(t.lastPr || 0);
+      return (
+        !EXCLUDE_BASES.has(base) &&
+        vol24h  > 50_000_000 &&  // $50M+ 24h volume — filters low-cap noise
+        price   > 0.0001          // exclude near-zero price tokens
+      );
+    })
+    .sort((a, b) => parseFloat(b.usdtVolume) - parseFloat(a.usdtVolume))
+    .slice(0, maxPairs)
+    .map(t => t.symbol);
+}
+
+function isWatchlistStale() {
+  if (!existsSync(WATCHLIST_FILE)) return true;
+  const wl  = JSON.parse(readFileSync(WATCHLIST_FILE, "utf8"));
+  const age = Date.now() - new Date(wl.updatedAt).getTime();
+  return age > 7 * 24 * 60 * 60 * 1000; // older than 7 days
+}
+
+async function refreshWatchlist() {
+  const isSunday = new Date().getUTCDay() === 0;
+  if (!isSunday && !isWatchlistStale()) return;
+
+  console.log(`\n🔍 ${isSunday ? "Sunday scan" : "Watchlist stale"} — discovering top pairs from BitGet...`);
+  try {
+    const pairs = await fetchTopPairs(15);
+    writeFileSync(WATCHLIST_FILE, JSON.stringify({ pairs, updatedAt: new Date().toISOString() }, null, 2));
+    console.log(`✅ Watchlist updated: ${pairs.join(", ")}\n`);
+  } catch (err) {
+    console.log(`⚠️  Pair scan failed: ${err.message} — keeping existing symbols.\n`);
+  }
+}
+
+function getActiveSymbols() {
+  if (existsSync(WATCHLIST_FILE)) {
+    try {
+      const wl = JSON.parse(readFileSync(WATCHLIST_FILE, "utf8"));
+      if (wl.pairs?.length) return wl.pairs;
+    } catch {}
+  }
+  return CONFIG.symbols; // fallback to env var
+}
 
 // ─── Open Positions Tracking ─────────────────────────────────────────────────
 
@@ -637,11 +700,14 @@ async function run() {
   console.log(`  Mode: ${CONFIG.paperTrading ? "📋 PAPER TRADING" : "🔴 LIVE TRADING"}`);
   console.log("═══════════════════════════════════════════════════════════");
 
+  await refreshWatchlist();
+  const symbols = getActiveSymbols();
+
   const modeLabel = CONFIG.strategyMode === "auto"
     ? "AUTO (scalp on high vol, intraday on low vol)"
     : STRATEGY_PARAMS[CONFIG.strategyMode]?.label || CONFIG.strategyMode;
   console.log(`\nStrategy mode: ${modeLabel}`);
-  console.log(`Symbols: ${CONFIG.symbols.join(", ")} | Daily loss limit: -${CONFIG.dailyLossLimitPct}%`);
+  console.log(`Symbols (${symbols.length}): ${symbols.join(", ")} | Daily loss limit: -${CONFIG.dailyLossLimitPct}%`);
 
   const log = loadLog();
   const withinLimits = checkTradeLimits(log);
@@ -650,7 +716,7 @@ async function run() {
     return;
   }
 
-  for (const symbol of CONFIG.symbols) {
+  for (const symbol of symbols) {
     if (!checkTradeLimits(log)) {
       console.log(`\n⚠️  Limit hit — stopping.`);
       break;
