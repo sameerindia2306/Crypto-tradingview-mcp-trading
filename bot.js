@@ -1,91 +1,31 @@
-/**
- * Claude + TradingView MCP — Automated Trading Bot
- *
- * Cloud mode: runs on Railway on a schedule. Pulls candle data direct from
- * Binance (free, no auth), calculates all indicators, runs safety check,
- * executes via BitGet if everything lines up.
- *
- * Local mode: run manually — node bot.js
- * Cloud mode: deploy to Railway, set env vars, Railway triggers on cron schedule
- */
-
 import "dotenv/config";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import crypto from "crypto";
-import { execSync } from "child_process";
 import http from "http";
-import { google } from "googleapis";
 import { exportToExcel } from "./export-excel.js";
 import { syncToSheets } from "./sync-sheets.js";
 
 // Health check endpoint so Railway can monitor and auto-restart if unresponsive
 http.createServer((_, res) => res.end("OK")).listen(process.env.PORT || 3000);
 
-// ─── Onboarding ───────────────────────────────────────────────────────────────
-
 function checkOnboarding() {
-  const required = ["BINANCE_API_KEY", "BINANCE_SECRET_KEY"];
-  const missing = required.filter((k) => !process.env[k]);
-
-  if (!existsSync(".env") && !process.env.BINANCE_API_KEY) {
-    console.log(
-      "\n⚠️  No .env file found — opening it for you to fill in...\n",
-    );
-    writeFileSync(
-      ".env",
-      [
-        "# Binance credentials",
-        "BINANCE_API_KEY=",
-        "BINANCE_SECRET_KEY=",
-        "",
-        "# Trading config",
-        "PORTFOLIO_VALUE_USD=1000",
-        "MAX_TRADE_SIZE_USD=100",
-        "MAX_TRADES_PER_DAY=3",
-        "PAPER_TRADING=true",
-        "SYMBOLS=XRPUSDT,HYPEUSDT,ETHUSDT,ADAUSDT",
-        "TIMEFRAME=5m",
-      ].join("\n") + "\n",
-    );
-    try {
-      execSync(process.platform === "win32" ? "notepad .env" : "open .env");
-    } catch {}
-    console.log(
-      "Fill in your Binance credentials in .env then re-run: node bot.js\n",
-    );
-    process.exit(0);
-  }
-
+  const missing = ["BINANCE_API_KEY", "BINANCE_SECRET_KEY"].filter(k => !process.env[k]);
   if (missing.length > 0) {
-    console.log(`\n⚠️  Missing credentials in .env: ${missing.join(", ")}`);
-    console.log("Opening .env for you now...\n");
-    try {
-      execSync("open .env");
-    } catch {}
-    console.log("Add the missing values then re-run: node bot.js\n");
-    process.exit(0);
+    console.log(`⚠️  Missing env vars: ${missing.join(", ")} — set them in Railway Variables.`);
+    process.exit(1);
   }
-
-  // Always print the CSV location so users know where to find their trade log
-  const csvPath = new URL("trades.csv", import.meta.url).pathname;
-  console.log(`\n📄 Trade log: ${csvPath}`);
-  console.log(
-    `   Open in Google Sheets or Excel any time — or tell Claude to move it:\n` +
-      `   "Move my trades.csv to ~/Desktop" or "Move it to my Documents folder"\n`,
-  );
 }
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols:          (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
-  strategyMode:     process.env.STRATEGY_MODE || "auto",   // "scalp" | "intraday" | "auto"
-  portfolioValue:   parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
-  maxTradeSizeUSD:  parseFloat(process.env.MAX_TRADE_SIZE_USD || "100"),
-  maxTradesPerDay:  parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
-  dailyLossLimitPct: parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"), // halt if day P&L < -3%
-  paperTrading:     process.env.PAPER_TRADING !== "false",
-  tradeMode:        process.env.TRADE_MODE || "spot",
+  symbols:           (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
+  strategyMode:      process.env.STRATEGY_MODE || "auto",
+  portfolioValue:    parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
+  maxTradeSizeUSD:   parseFloat(process.env.MAX_TRADE_SIZE_USD || "100"),
+  maxTradesPerDay:   parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
+  dailyLossLimitPct: parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"),
+  paperTrading:      process.env.PAPER_TRADING !== "false",
   binance: {
     apiKey:    process.env.BINANCE_API_KEY,
     secretKey: process.env.BINANCE_SECRET_KEY,
@@ -224,21 +164,6 @@ async function fetchCandles(symbol, interval, limit = 100) {
   return fetchCandlesBitget(symbol, interval, limit);
 }
 
-async function fetchCandlesBinance(symbol, interval, limit) {
-  const intervalMap = {
-    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1H": "1h", "4H": "4h", "1D": "1d", "1W": "1w",
-  };
-  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${intervalMap[interval] || "1m"}&limit=${limit}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Binance API error: ${res.status}`);
-  const data = await res.json();
-  return data.map((k) => ({
-    time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
-    low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
-  }));
-}
-
 async function fetchCandlesBitget(symbol, interval, limit) {
   const intervalMap = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
@@ -293,16 +218,6 @@ function calcATR(candles, period = 14) {
     trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
   return trs.reduce((a, b) => a + b, 0) / trs.length;
-}
-
-function calcVolumeRatio(candles, period = 20) {
-  if (candles.length < period + 1) return null;
-  const avgVol = candles.slice(-period - 1, -1).reduce((s, c) => s + c.volume, 0) / period;
-  return avgVol === 0 ? null : candles[candles.length - 1].volume / avgVol;
-}
-
-function isInTradingSession() {
-  return true; // Crypto trades 24/7
 }
 
 // VWAP — session-based, resets at midnight UTC
@@ -437,53 +352,13 @@ async function placeBinanceOrder(symbol, side, sizeUSD, price) {
   return { orderId: data.orderId };
 }
 
-// ─── Google Sheets Live Append ───────────────────────────────────────────────
-
-const SHEET_ID   = process.env.GOOGLE_SHEET_ID;
-const SHEET_NAME = "Trades";
-
-async function getSheetsClient() {
-  let credentials;
-  if (process.env.GOOGLE_CREDENTIALS_B64) {
-    credentials = JSON.parse(Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8"));
-  } else if (process.env.GOOGLE_CREDENTIALS_PATH && existsSync(process.env.GOOGLE_CREDENTIALS_PATH)) {
-    credentials = JSON.parse(readFileSync(process.env.GOOGLE_CREDENTIALS_PATH, "utf8"));
-  } else {
-    return null;
-  }
-  const auth = new google.auth.GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
-  return google.sheets({ version: "v4", auth: await auth.getClient() });
-}
-
-async function ensureSheetHeaders(sheets) {
-  try {
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A1:R1` });
-    if (!res.data.values || !res.data.values.length) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A1`,
-        valueInputOption: "RAW",
-        requestBody: { values: [CSV_HEADERS.split(",")] },
-      });
-    }
-  } catch {}
-}
-
-async function appendSheetRow(_row) {
-  // No-op — syncToSheets() rewrites all tabs at end of each cycle
-}
-
 // ─── Tax CSV Logging ─────────────────────────────────────────────────────────
 
 const CSV_FILE = process.env.TRADE_LOG_PATH || "trades.csv";
 
-// Always ensure trades.csv exists with headers — open it in Excel/Sheets any time
 function initCsv() {
   if (!existsSync(CSV_FILE)) {
-    const funnyNote = `,,,,,,,,,,,"NOTE","Hey, if you're at this stage of the video, you must be enjoying it... perhaps you could hit subscribe now? :)"`;
-    writeFileSync(CSV_FILE, CSV_HEADERS + "\n" + funnyNote + "\n");
-    console.log(
-      `📄 Created ${CSV_FILE} — open in Google Sheets or Excel to track trades.`,
-    );
+    writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
   }
 }
 const CSV_HEADERS = [
@@ -575,8 +450,6 @@ function writeTradeCsv(logEntry) {
   }
 
   appendFileSync(CSV_FILE, row + "\n");
-  console.log(`Tax record saved → ${CSV_FILE}`);
-  appendSheetRow(row.split(",")).catch(() => {});
 }
 
 function writeCloseCsv(closed) {
@@ -607,8 +480,7 @@ function writeCloseCsv(closed) {
   ].join(",");
 
   appendFileSync(CSV_FILE, row + "\n");
-  appendSheetRow(row.split(",")).catch(() => {});
-  console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} logged → ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%)`);
+  console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} → ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%)`);
 }
 
 // Tax summary command: node bot.js --tax-summary
