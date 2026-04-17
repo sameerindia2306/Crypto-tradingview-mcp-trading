@@ -1,50 +1,28 @@
 {
-  "watchlist": ["BTCUSDT"],
-  "default_timeframe": "1m",
-
+  "watchlist": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "HYPEUSDT"],
+  "default_timeframe": "15m",
   "strategy": {
-    "name": "VWAP + RSI(3) + EMA(8) Scalping Strategy",
-    "sources": ["Lewis Jackson"],
-    "description": "Three indicators, each doing a different job. EMA(8) for trend direction, VWAP for session bias, RSI(3) for entry timing. All three must align before a trade fires."
+    "name": "EMA(9/21) Cross + VWAP + RSI(14) Trend Follow — Crypto 24/7",
+    "description": "Trend-following strategy for crypto. No session filter — crypto trades 24/7. EMA(9/21) cross confirms trend direction, VWAP anchors value area, RSI(14) in momentum zone confirms entry timing. 3:1 RR with 0.5% SL."
   },
-
   "indicators": {
-    "ema_8": "Trend direction. Price above EMA(8) = bullish momentum. Below = bearish.",
-    "vwap": "Session bias. Price above VWAP = buyers in control. Below = sellers. Resets at midnight UTC.",
-    "rsi_3": "Entry timing. RSI on 3 candles only — extremely sensitive. Below 30 in an uptrend = snap-back setup. Above 70 in a downtrend = reversal likely."
+    "ema_9":  "Fast trend. EMA(9) above EMA(21) = bullish trend active.",
+    "ema_21": "Slow trend. EMA(9) crossing above = uptrend confirmed.",
+    "vwap":   "Session anchor. Price within 2.0% of VWAP = near value, not overextended.",
+    "rsi_14": "Momentum filter. 45–65 in uptrend = momentum intact. 35–55 in downtrend = momentum intact."
   },
-
-  "bias_criteria": {
-    "bullish": ["Price is above VWAP", "Price is above EMA(8)"],
-    "bearish": ["Price is below VWAP", "Price is below EMA(8)"]
-  },
-
+  "sessions": "24/7 — no session filter. Crypto moves at all hours.",
   "entry_rules": {
-    "long": [
-      "Price is above VWAP — buyers in control for the session",
-      "Price is above EMA(8) — uptrend confirmed",
-      "RSI(3) has dropped below 30 — short-term pullback in an uptrend, snap-back likely"
-    ],
-    "short": [
-      "Price is below VWAP — sellers in control",
-      "Price is below EMA(8) — downtrend confirmed",
-      "RSI(3) has spiked above 70 — overbought in a downtrend, reversal likely"
-    ]
+    "long":  ["Price above VWAP", "EMA(9) above EMA(21)", "RSI(14) between 45–65", "Price within 2.0% of VWAP"],
+    "short": ["Price below VWAP", "EMA(9) below EMA(21)", "RSI(14) between 35–55", "Price within 2.0% of VWAP"]
   },
-
-  "exit_rules": [
-    "Exit when RSI(3) crosses back above 50 (for longs) or below 50 (for shorts)",
-    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts",
-    "Take profit at next VWAP touch or EMA(8) cross"
-  ],
-
+  "exit_rules": {
+    "stop_loss":   "0.5% from entry",
+    "take_profit": "1.5% from entry (3:1 RR)"
+  },
   "risk_rules": [
-    "Risk maximum 1% of portfolio per trade",
-    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env",
-    "Maximum trades per day capped by MAX_TRADES_PER_DAY in .env",
-    "Do not trade if price is more than 1.5% away from VWAP — overextended",
-    "Paper trade first — validate this strategy on your specific asset before going live"
-  ],
-
-  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes."
+    "Max 1% portfolio per trade",
+    "Max trade size capped by MAX_TRADE_SIZE_USD",
+    "Max trades per day capped by MAX_TRADES_PER_DAY"
+  ]
 }
