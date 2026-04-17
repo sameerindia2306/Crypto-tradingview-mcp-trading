@@ -157,14 +157,9 @@ function countTodaysTrades(log) {
 }
 
 // ─── Market Data ─────────────────────────────────────────────────────────────
-// Uses Binance for crypto pairs, BitGet for everything else (e.g. XAUUSDT)
 
 async function fetchCandles(symbol, interval, limit = 100) {
-  // BitGet used for all symbols — Binance.com is geo-blocked on Railway (US servers, 451 error)
-  return fetchCandlesBitget(symbol, interval, limit);
-}
-
-async function fetchCandlesBitget(symbol, interval, limit) {
+  // Binance.com geo-blocked on Railway US servers — BitGet used for all candle data
   const intervalMap = {
     "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
     "1H": "1H", "4H": "4H", "1D": "1D", "1W": "1W",
@@ -356,11 +351,6 @@ async function placeBinanceOrder(symbol, side, sizeUSD, price) {
 
 const CSV_FILE = process.env.TRADE_LOG_PATH || "trades.csv";
 
-function initCsv() {
-  if (!existsSync(CSV_FILE)) {
-    writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
-  }
-}
 const CSV_HEADERS = [
   "Date",
   "Time (UTC)",
@@ -381,6 +371,10 @@ const CSV_HEADERS = [
   "P&L %",
   "Notes",
 ].join(",");
+
+function initCsv() {
+  if (!existsSync(CSV_FILE)) writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
+}
 
 function writeTradeCsv(logEntry) {
   const now = new Date(logEntry.timestamp);
