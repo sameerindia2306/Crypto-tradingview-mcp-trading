@@ -15,6 +15,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import http from "http";
 import { google } from "googleapis";
+import { exportToExcel } from "./export-excel.js";
 
 // Health check endpoint so Railway can monitor and auto-restart if unresponsive
 http.createServer((_, res) => res.end("OK")).listen(process.env.PORT || 3000);
@@ -703,6 +704,7 @@ async function run() {
   saveLog(log);
   console.log(`\nDecision log saved → ${LOG_FILE}`);
   console.log(`Tax record saved → ${CSV_FILE}`);
+  await exportToExcel().catch(err => console.log(`  ⚠️  Excel export failed: ${err.message}`));
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 
