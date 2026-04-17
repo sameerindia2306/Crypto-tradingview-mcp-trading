@@ -78,17 +78,46 @@ function checkOnboarding() {
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols: (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
-  timeframe: process.env.TIMEFRAME || "15m",
-  portfolioValue: parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
-  maxTradeSizeUSD: parseFloat(process.env.MAX_TRADE_SIZE_USD || "100"),
-  maxTradesPerDay: parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
-  paperTrading: process.env.PAPER_TRADING !== "false",
-  tradeMode: process.env.TRADE_MODE || "spot",
+  symbols:          (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
+  strategyMode:     process.env.STRATEGY_MODE || "auto",   // "scalp" | "intraday" | "auto"
+  portfolioValue:   parseFloat(process.env.PORTFOLIO_VALUE_USD || "1000"),
+  maxTradeSizeUSD:  parseFloat(process.env.MAX_TRADE_SIZE_USD || "100"),
+  maxTradesPerDay:  parseInt(process.env.MAX_TRADES_PER_DAY || "3"),
+  dailyLossLimitPct: parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"), // halt if day P&L < -3%
+  paperTrading:     process.env.PAPER_TRADING !== "false",
+  tradeMode:        process.env.TRADE_MODE || "spot",
   binance: {
-    apiKey: process.env.BINANCE_API_KEY,
+    apiKey:    process.env.BINANCE_API_KEY,
     secretKey: process.env.BINANCE_SECRET_KEY,
-    baseUrl: "https://api.binance.com",
+    baseUrl:   "https://api.binance.com",
+  },
+};
+
+// Strategy parameter presets
+const STRATEGY_PARAMS = {
+  scalp: {
+    timeframe:         "5m",
+    emaFast:           5,
+    emaSlow:           13,
+    rsiBullMin:        50, rsiBullMax: 68,
+    rsiBearMin:        32, rsiBearMax: 50,
+    vwapMaxDistPct:    0.8,
+    slAtrMult:         1.0,
+    tpAtrMult:         2.0,   // 2:1 RR — faster fills on tight timeframe
+    trendStrengthMin:  0.05,  // min % EMA separation to confirm trend
+    label:             "Scalp 5m — EMA(5/13)",
+  },
+  intraday: {
+    timeframe:         "15m",
+    emaFast:           9,
+    emaSlow:           21,
+    rsiBullMin:        45, rsiBullMax: 65,
+    rsiBearMin:        35, rsiBearMax: 55,
+    vwapMaxDistPct:    2.0,
+    slAtrMult:         1.5,
+    tpAtrMult:         4.5,   // 3:1 RR
+    trendStrengthMin:  0.10,
+    label:             "Intraday 15m — EMA(9/21)",
   },
 };
 
@@ -106,14 +135,22 @@ function savePositions(positions) {
   writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
 }
 
-function addPosition(symbol, side, entryPrice, quantity, orderId, paperTrading) {
-  const slPct = 0.005; // 0.5% hard stop
-  const tpPct = 0.015; // 1.5% = 3:1 RR
-  const sl = side === "buy" ? entryPrice * (1 - slPct) : entryPrice * (1 + slPct);
-  const tp = side === "buy" ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct);
+function addPosition(symbol, side, entryPrice, quantity, orderId, paperTrading, atr, params) {
+  // ATR-based TP/SL — adapts to current volatility, not fixed %
+  const slDist = atr * params.slAtrMult;
+  const tpDist = atr * params.tpAtrMult;
+  const sl = side === "buy" ? entryPrice - slDist : entryPrice + slDist;
+  const tp = side === "buy" ? entryPrice + tpDist : entryPrice - tpDist;
   const positions = loadPositions();
-  positions.push({ symbol, side, entryPrice, quantity, orderId, sl, tp, paperTrading, openedAt: new Date().toISOString() });
+  positions.push({
+    symbol, side, entryPrice, quantity, orderId, sl, tp,
+    paperTrading, openedAt: new Date().toISOString(),
+    slMoved: false,       // trailing stop: tracks if SL moved to breakeven
+    bestPrice: entryPrice // trailing stop: tracks best price seen since entry
+  });
   savePositions(positions);
+  const rrRatio = (tpDist / slDist).toFixed(1);
+  console.log(`  📍 TP: $${tp.toFixed(4)} (+${tpDist.toFixed(4)}) | SL: $${sl.toFixed(4)} (-${slDist.toFixed(4)}) | RR: ${rrRatio}:1 | ATR: ${atr.toFixed(4)}`);
 }
 
 function checkAndClosePositions(symbol, currentPrice) {
@@ -124,6 +161,23 @@ function checkAndClosePositions(symbol, currentPrice) {
   for (const pos of positions) {
     if (pos.symbol !== symbol) { remaining.push(pos); continue; }
     const isLong = pos.side === "buy";
+
+    // Trailing stop: track best price and move SL to breakeven at 50% of TP distance
+    const tpDist = Math.abs(pos.tp - pos.entryPrice);
+    const progress = isLong
+      ? currentPrice - pos.entryPrice
+      : pos.entryPrice - currentPrice;
+
+    if (!pos.slMoved && progress >= tpDist * 0.5) {
+      pos.sl = pos.entryPrice; // move SL to breakeven
+      pos.slMoved = true;
+      console.log(`  🔒 Trailing stop moved to breakeven for ${pos.symbol} @ $${pos.entryPrice.toFixed(4)}`);
+    }
+
+    // Update best price seen
+    if (isLong && currentPrice > (pos.bestPrice || pos.entryPrice)) pos.bestPrice = currentPrice;
+    if (!isLong && currentPrice < (pos.bestPrice || pos.entryPrice)) pos.bestPrice = currentPrice;
+
     const hitSL = isLong ? currentPrice <= pos.sl : currentPrice >= pos.sl;
     const hitTP = isLong ? currentPrice >= pos.tp : currentPrice <= pos.tp;
 
@@ -133,7 +187,8 @@ function checkAndClosePositions(symbol, currentPrice) {
         ? (exitPrice - pos.entryPrice) * pos.quantity
         : (pos.entryPrice - exitPrice) * pos.quantity;
       const pnlPct = ((exitPrice - pos.entryPrice) / pos.entryPrice) * (isLong ? 100 : -100);
-      closed.push({ ...pos, exitPrice, exitTime: new Date().toISOString(), pnlUSD, pnlPct, result: hitTP ? "WIN" : "LOSS" });
+      const result = hitTP ? "WIN" : (pos.slMoved ? "BREAKEVEN" : "LOSS");
+      closed.push({ ...pos, exitPrice, exitTime: new Date().toISOString(), pnlUSD, pnlPct, result });
     } else {
       remaining.push(pos);
     }
@@ -229,6 +284,17 @@ function calcRSI(closes, period = 14) {
   return 100 - 100 / (1 + rs);
 }
 
+function calcATR(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const trs = [];
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const { high, low } = candles[i];
+    const prevClose = candles[i - 1].close;
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  return trs.reduce((a, b) => a + b, 0) / trs.length;
+}
+
 function calcVolumeRatio(candles, period = 20) {
   if (candles.length < period + 1) return null;
   const avgVol = candles.slice(-period - 1, -1).reduce((s, c) => s + c.volume, 0) / period;
@@ -255,9 +321,8 @@ function calcVWAP(candles) {
 
 // ─── Safety Check ───────────────────────────────────────────────────────────
 
-function runSafetyCheck(price, ema9, ema21, vwap, rsi14) {
+function runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params) {
   const results = [];
-
   const check = (label, required, actual, pass) => {
     results.push({ label, required, actual, pass });
     console.log(`  ${pass ? "✅" : "🚫"} ${label}`);
@@ -266,65 +331,77 @@ function runSafetyCheck(price, ema9, ema21, vwap, rsi14) {
 
   console.log("\n── Safety Check ─────────────────────────────────────────\n");
 
-  const bullish = price > vwap && ema9 > ema21;
-  const bearish = price < vwap && ema9 < ema21;
-  const distFromVWAP = vwap ? Math.abs((price - vwap) / vwap) * 100 : 999;
+  const bullish = price > vwap && emaFast > emaSlow;
+  const bearish = price < vwap && emaFast < emaSlow;
+  const distFromVWAP   = vwap ? Math.abs((price - vwap) / vwap) * 100 : 999;
+  const trendStrengthPct = Math.abs(emaFast - emaSlow) / price * 100;
+
+  // Trend strength filter — skip choppy/flat markets
+  if (trendStrengthPct < params.trendStrengthMin) {
+    console.log(`  Bias: CHOPPY — EMA spread ${trendStrengthPct.toFixed(3)}% < min ${params.trendStrengthMin}%. No trade.\n`);
+    results.push({ label: "Trend strength", required: `>= ${params.trendStrengthMin}%`, actual: `${trendStrengthPct.toFixed(3)}%`, pass: false });
+    return { results, allPass: false, bias: "neutral" };
+  }
 
   if (bullish) {
     console.log("  Bias: BULLISH — checking long entry conditions\n");
-    check("Price above VWAP (buyers in control)",      `> ${vwap.toFixed(4)}`,  price.toFixed(4),  price > vwap);
-    check("EMA(9) above EMA(21) — uptrend confirmed",  `> ${ema21.toFixed(4)}`, ema9.toFixed(4),   ema9 > ema21);
-    check("RSI(14) in momentum zone (45–65)",          "45–65",                 rsi14 ? rsi14.toFixed(1) : "N/A", rsi14 !== null && rsi14 >= 45 && rsi14 <= 65);
-    check("Price within 2.0% of VWAP (not overextended)", "< 2.0%",            `${distFromVWAP.toFixed(2)}%`,    distFromVWAP < 2.0);
+    check(`Price above VWAP`,                               `> ${vwap.toFixed(4)}`,     price.toFixed(4),               price > vwap);
+    check(`EMA(${params.emaFast}) above EMA(${params.emaSlow}) — uptrend`, `> ${emaSlow.toFixed(4)}`, emaFast.toFixed(4), emaFast > emaSlow);
+    check(`RSI(14) in momentum zone (${params.rsiBullMin}–${params.rsiBullMax})`, `${params.rsiBullMin}–${params.rsiBullMax}`, rsi14 ? rsi14.toFixed(1) : "N/A", rsi14 !== null && rsi14 >= params.rsiBullMin && rsi14 <= params.rsiBullMax);
+    check(`Price within ${params.vwapMaxDistPct}% of VWAP`, `< ${params.vwapMaxDistPct}%`, `${distFromVWAP.toFixed(2)}%`, distFromVWAP < params.vwapMaxDistPct);
   } else if (bearish) {
     console.log("  Bias: BEARISH — checking short entry conditions\n");
-    check("Price below VWAP (sellers in control)",     `< ${vwap.toFixed(4)}`,  price.toFixed(4),  price < vwap);
-    check("EMA(9) below EMA(21) — downtrend confirmed",`< ${ema21.toFixed(4)}`, ema9.toFixed(4),   ema9 < ema21);
-    check("RSI(14) in momentum zone (35–55)",          "35–55",                 rsi14 ? rsi14.toFixed(1) : "N/A", rsi14 !== null && rsi14 >= 35 && rsi14 <= 55);
-    check("Price within 2.0% of VWAP (not overextended)", "< 2.0%",            `${distFromVWAP.toFixed(2)}%`,    distFromVWAP < 2.0);
+    check(`Price below VWAP`,                               `< ${vwap.toFixed(4)}`,     price.toFixed(4),               price < vwap);
+    check(`EMA(${params.emaFast}) below EMA(${params.emaSlow}) — downtrend`, `< ${emaSlow.toFixed(4)}`, emaFast.toFixed(4), emaFast < emaSlow);
+    check(`RSI(14) in momentum zone (${params.rsiBearMin}–${params.rsiBearMax})`, `${params.rsiBearMin}–${params.rsiBearMax}`, rsi14 ? rsi14.toFixed(1) : "N/A", rsi14 !== null && rsi14 >= params.rsiBearMin && rsi14 <= params.rsiBearMax);
+    check(`Price within ${params.vwapMaxDistPct}% of VWAP`, `< ${params.vwapMaxDistPct}%`, `${distFromVWAP.toFixed(2)}%`, distFromVWAP < params.vwapMaxDistPct);
   } else {
     console.log("  Bias: NEUTRAL — no clear direction. No trade.\n");
     results.push({ label: "Market bias", required: "Bullish or bearish", actual: "Neutral", pass: false });
   }
 
-  const allPass = results.every((r) => r.pass);
+  const allPass = results.every(r => r.pass);
   const bias = bullish ? "bullish" : bearish ? "bearish" : "neutral";
   return { results, allPass, bias };
 }
 
 // ─── Trade Limits ────────────────────────────────────────────────────────────
 
+function getDailyPnL() {
+  if (!existsSync(CSV_FILE)) return 0;
+  const today = new Date().toISOString().slice(0, 10);
+  const lines = readFileSync(CSV_FILE, "utf8").trim().split("\n").slice(1);
+  return lines
+    .filter(l => l.startsWith(today))
+    .reduce((sum, l) => {
+      const cols = l.split(",");
+      const pnl = parseFloat(cols[15] || "0");
+      return sum + (isNaN(pnl) ? 0 : pnl);
+    }, 0);
+}
+
 function checkTradeLimits(log) {
   const todayCount = countTodaysTrades(log);
 
   console.log("\n── Trade Limits ─────────────────────────────────────────\n");
 
+  // Daily loss circuit breaker
+  const dailyPnL    = getDailyPnL();
+  const lossLimit   = -(CONFIG.portfolioValue * CONFIG.dailyLossLimitPct / 100);
+  if (dailyPnL <= lossLimit) {
+    console.log(`🛑 DAILY LOSS LIMIT HIT — P&L today: $${dailyPnL.toFixed(2)} | Limit: $${lossLimit.toFixed(2)}. No more trades today.`);
+    return false;
+  }
+  console.log(`✅ Daily P&L: $${dailyPnL.toFixed(2)} | Loss limit: $${lossLimit.toFixed(2)}`);
+
   if (todayCount >= CONFIG.maxTradesPerDay) {
-    console.log(
-      `🚫 Max trades per day reached: ${todayCount}/${CONFIG.maxTradesPerDay}`,
-    );
+    console.log(`🚫 Max trades per day reached: ${todayCount}/${CONFIG.maxTradesPerDay}`);
     return false;
   }
+  console.log(`✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`);
 
-  console.log(
-    `✅ Trades today: ${todayCount}/${CONFIG.maxTradesPerDay} — within limit`,
-  );
-
-  const tradeSize = Math.min(
-    CONFIG.portfolioValue * 0.05,
-    CONFIG.maxTradeSizeUSD,
-  );
-
-  if (tradeSize > CONFIG.maxTradeSizeUSD) {
-    console.log(
-      `🚫 Trade size $${tradeSize.toFixed(2)} exceeds max $${CONFIG.maxTradeSizeUSD}`,
-    );
-    return false;
-  }
-
-  console.log(
-    `✅ Trade size: $${tradeSize.toFixed(2)} — within max $${CONFIG.maxTradeSizeUSD}`,
-  );
+  const tradeSize = Math.min(CONFIG.portfolioValue * 0.01, CONFIG.maxTradeSizeUSD);
+  console.log(`✅ Trade size: $${tradeSize.toFixed(2)} — within max $${CONFIG.maxTradeSizeUSD}`);
 
   return true;
 }
@@ -570,76 +647,100 @@ function generateTaxSummary() {
 
 // ─── Per-symbol run ──────────────────────────────────────────────────────────
 
-async function runSymbol(symbol, rules, log) {
+async function runSymbol(symbol, log) {
   console.log(`\n── ${symbol} ─────────────────────────────────────────────`);
 
-  // Fetch candle data
+  // Resolve strategy mode — auto picks based on ATR volatility
+  let params = STRATEGY_PARAMS[CONFIG.strategyMode] || STRATEGY_PARAMS.intraday;
+
+  // Fetch candle data (use intraday timeframe for initial fetch; scalp fetches separately if auto)
   let candles;
   try {
-    candles = await fetchCandles(symbol, CONFIG.timeframe, 500);
+    candles = await fetchCandles(symbol, params.timeframe, 500);
   } catch (err) {
     console.log(`  ⚠️  Could not fetch data for ${symbol}: ${err.message}`);
     return;
   }
 
-  const closes = candles.map((c) => c.close);
-  const price = closes[closes.length - 1];
-  console.log(`  Price: $${price.toFixed(4)}`);
+  // Auto mode: measure ATR volatility and pick scalp vs intraday
+  if (CONFIG.strategyMode === "auto") {
+    const atrForMode = calcATR(candles, 14);
+    const atrPct     = atrForMode ? (atrForMode / candles[candles.length - 1].close) * 100 : 0;
+    if (atrPct >= 0.5) {
+      params = STRATEGY_PARAMS.scalp;
+      // Re-fetch on scalp timeframe if needed
+      if (params.timeframe !== STRATEGY_PARAMS.intraday.timeframe) {
+        try { candles = await fetchCandles(symbol, params.timeframe, 500); } catch {}
+      }
+      console.log(`  📊 AUTO: high volatility (ATR ${atrPct.toFixed(2)}%) → SCALP mode`);
+    } else {
+      params = STRATEGY_PARAMS.intraday;
+      console.log(`  📊 AUTO: low volatility (ATR ${atrPct.toFixed(2)}%) → INTRADAY mode`);
+    }
+  }
+  console.log(`  Strategy: ${params.label}`);
 
-  // Check if any open positions for this symbol have hit TP or SL
+  const closes = candles.map(c => c.close);
+  const price  = closes[closes.length - 1];
+  const atr    = calcATR(candles, 14);
+  console.log(`  Price: $${price.toFixed(4)} | ATR(14): ${atr ? "$" + atr.toFixed(4) : "N/A"}`);
+
+  if (!atr) {
+    console.log(`  ⚠️  Not enough data for ATR — skipping.`);
+    return;
+  }
+
+  // Check open positions for TP/SL/trailing stop
   const closed = checkAndClosePositions(symbol, price);
   if (closed.length > 0) {
     console.log(`  Checking open positions...`);
     for (const c of closed) writeCloseCsv(c);
   }
 
-  const ema9  = calcEMA(closes, 9);
-  const ema21 = calcEMA(closes, 21);
-  const vwap  = calcVWAP(candles);
-  const rsi14 = calcRSI(closes, 14);
+  const emaFast = calcEMA(closes, params.emaFast);
+  const emaSlow = calcEMA(closes, params.emaSlow);
+  const vwap    = calcVWAP(candles);
+  const rsi14   = calcRSI(closes, 14);
 
-  console.log(`  EMA(9): $${ema9.toFixed(4)} | EMA(21): $${ema21.toFixed(4)} | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI(14): ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
+  console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI(14): ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
   if (!vwap || rsi14 === null) {
-    console.log(`  ⚠️  Not enough data to calculate indicators — skipping.`);
+    console.log(`  ⚠️  Not enough data for indicators — skipping.`);
     return;
   }
 
-  const { results, allPass, bias } = runSafetyCheck(price, ema9, ema21, vwap, rsi14);
+  const { results, allPass, bias } = runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params);
   const tradeSize = Math.min(CONFIG.portfolioValue * 0.01, CONFIG.maxTradeSizeUSD);
 
   const logEntry = {
     timestamp: new Date().toISOString(),
     symbol,
-    timeframe: CONFIG.timeframe,
+    timeframe: params.timeframe,
+    strategyMode: params.label,
     price,
-    indicators: { ema9, ema21, vwap, rsi14 },
+    indicators: { emaFast, emaSlow, vwap, rsi14, atr },
     conditions: results,
     allPass,
     tradeSize,
     orderPlaced: false,
     orderId: null,
     paperTrading: CONFIG.paperTrading,
-    limits: {
-      maxTradeSizeUSD: CONFIG.maxTradeSizeUSD,
-      maxTradesPerDay: CONFIG.maxTradesPerDay,
-      tradesToday: countTodaysTrades(log),
-    },
+    limits: { maxTradeSizeUSD: CONFIG.maxTradeSizeUSD, maxTradesPerDay: CONFIG.maxTradesPerDay, tradesToday: countTodaysTrades(log) },
   };
 
   if (!allPass) {
-    const failed = results.filter((r) => !r.pass).map((r) => r.label);
+    const failed = results.filter(r => !r.pass).map(r => r.label);
     console.log(`  🚫 BLOCKED — ${failed.join("; ")}`);
   } else {
     console.log(`  ✅ ALL CONDITIONS MET`);
-    const side = bias === "bearish" ? "sell" : "buy";
+    const side     = bias === "bearish" ? "sell" : "buy";
     const quantity = tradeSize / price;
 
     if (CONFIG.paperTrading) {
       console.log(`  📋 PAPER TRADE — would ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)} at market`);
       logEntry.orderPlaced = true;
       logEntry.orderId = `PAPER-${Date.now()}`;
-      addPosition(symbol, side, price, quantity, logEntry.orderId, true);
+      addPosition(symbol, side, price, quantity, logEntry.orderId, true, atr, params);
     } else {
       console.log(`  🔴 PLACING LIVE ORDER — $${tradeSize.toFixed(2)} ${side.toUpperCase()} ${symbol}`);
       try {
@@ -647,7 +748,7 @@ async function runSymbol(symbol, rules, log) {
         logEntry.orderPlaced = true;
         logEntry.orderId = order.orderId;
         console.log(`  ✅ ORDER PLACED — ${order.orderId}`);
-        addPosition(symbol, side, price, quantity, order.orderId, false);
+        addPosition(symbol, side, price, quantity, order.orderId, false, atr, params);
       } catch (err) {
         console.log(`  ❌ ORDER FAILED — ${err.message}`);
         logEntry.error = err.message;
@@ -670,24 +771,25 @@ async function run() {
   console.log(`  Mode: ${CONFIG.paperTrading ? "📋 PAPER TRADING" : "🔴 LIVE TRADING"}`);
   console.log("═══════════════════════════════════════════════════════════");
 
-  const rules = JSON.parse(readFileSync("rules.json", "utf8"));
-  console.log(`\nStrategy: ${rules.strategy.name}`);
-  console.log(`Symbols: ${CONFIG.symbols.join(", ")} | Timeframe: ${CONFIG.timeframe}`);
+  const modeLabel = CONFIG.strategyMode === "auto"
+    ? "AUTO (scalp on high vol, intraday on low vol)"
+    : STRATEGY_PARAMS[CONFIG.strategyMode]?.label || CONFIG.strategyMode;
+  console.log(`\nStrategy mode: ${modeLabel}`);
+  console.log(`Symbols: ${CONFIG.symbols.join(", ")} | Daily loss limit: -${CONFIG.dailyLossLimitPct}%`);
 
   const log = loadLog();
   const withinLimits = checkTradeLimits(log);
   if (!withinLimits) {
-    console.log("\nBot stopping — daily trade limit reached.");
+    console.log("\nBot halted — limit reached.");
     return;
   }
 
   for (const symbol of CONFIG.symbols) {
-    // Re-check limit before each symbol in case it was hit mid-run
     if (!checkTradeLimits(log)) {
-      console.log(`\n⚠️  Daily trade limit hit — stopping after ${symbol} skipped.`);
+      console.log(`\n⚠️  Limit hit — stopping.`);
       break;
     }
-    await runSymbol(symbol, rules, log);
+    await runSymbol(symbol, log);
   }
 
   saveLog(log);
