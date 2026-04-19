@@ -22,10 +22,10 @@ function checkOnboarding() {
 const CONFIG = {
   symbols:              (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
   strategyMode:         process.env.STRATEGY_MODE || "auto",
-  portfolioValue:       parseFloat(process.env.PORTFOLIO_VALUE_USD || "250"),
+  portfolioValue:       parseFloat(process.env.PORTFOLIO_VALUE_USD || "10000"),
   maxTradeSizeUSD:      parseFloat(process.env.MAX_TRADE_SIZE_USD || "12"),
-  maxTradesPerDay:      parseInt(process.env.MAX_TRADES_PER_DAY || "6"),
-  maxTradesPerSymbol:   parseInt(process.env.MAX_TRADES_PER_SYMBOL || "2"),
+  maxTradesPerDay:      parseInt(process.env.MAX_TRADES_PER_DAY || "200"),
+  maxTradesPerSymbol:   parseInt(process.env.MAX_TRADES_PER_SYMBOL || "999"),
   dailyLossLimitPct:    parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"),
   paperTrading:         process.env.PAPER_TRADING !== "false",
   binance: {
