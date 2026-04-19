@@ -20,13 +20,14 @@ function checkOnboarding() {
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-  symbols:           (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
-  strategyMode:      process.env.STRATEGY_MODE || "auto",
-  portfolioValue:    parseFloat(process.env.PORTFOLIO_VALUE_USD || "250"),
-  maxTradeSizeUSD:   parseFloat(process.env.MAX_TRADE_SIZE_USD || "12"),
-  maxTradesPerDay:   parseInt(process.env.MAX_TRADES_PER_DAY || "6"),
-  dailyLossLimitPct: parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"),
-  paperTrading:      process.env.PAPER_TRADING !== "false",
+  symbols:              (process.env.SYMBOLS || process.env.SYMBOL || "BTCUSDT").split(",").map(s => s.trim()),
+  strategyMode:         process.env.STRATEGY_MODE || "auto",
+  portfolioValue:       parseFloat(process.env.PORTFOLIO_VALUE_USD || "250"),
+  maxTradeSizeUSD:      parseFloat(process.env.MAX_TRADE_SIZE_USD || "12"),
+  maxTradesPerDay:      parseInt(process.env.MAX_TRADES_PER_DAY || "6"),
+  maxTradesPerSymbol:   parseInt(process.env.MAX_TRADES_PER_SYMBOL || "2"),
+  dailyLossLimitPct:    parseFloat(process.env.DAILY_LOSS_LIMIT_PCT || "3"),
+  paperTrading:         process.env.PAPER_TRADING !== "false",
   binance: {
     apiKey:    process.env.BINANCE_API_KEY,
     secretKey: process.env.BINANCE_SECRET_KEY,
@@ -215,9 +216,12 @@ function saveLog(log) {
 
 function countTodaysTrades(log) {
   const today = new Date().toISOString().slice(0, 10);
-  return log.trades.filter(
-    (t) => t.timestamp.startsWith(today) && t.orderPlaced,
-  ).length;
+  return log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced).length;
+}
+
+function countTodaysSymbolTrades(log, symbol) {
+  const today = new Date().toISOString().slice(0, 10);
+  return log.trades.filter(t => t.timestamp.startsWith(today) && t.orderPlaced && t.symbol === symbol).length;
 }
 
 // ─── Market Data ─────────────────────────────────────────────────────────────
@@ -621,6 +625,12 @@ function generateTaxSummary() {
 
 async function runSymbol(symbol, log) {
   console.log(`\n── ${symbol} ─────────────────────────────────────────────`);
+
+  const symbolTradesCount = countTodaysSymbolTrades(log, symbol);
+  if (symbolTradesCount >= CONFIG.maxTradesPerSymbol) {
+    console.log(`  ⏭  Symbol limit reached (${symbolTradesCount}/${CONFIG.maxTradesPerSymbol}) — skipping`);
+    return;
+  }
 
   // Resolve strategy mode — auto picks based on ATR% volatility, locked for this symbol
   let params = STRATEGY_PARAMS[CONFIG.strategyMode] || STRATEGY_PARAMS.intraday;
