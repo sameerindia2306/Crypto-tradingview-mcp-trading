@@ -38,28 +38,26 @@ const CONFIG = {
 // Strategy parameter presets
 const STRATEGY_PARAMS = {
   scalp: {
-    timeframe:         "5m",
-    emaFast:           5,
-    emaSlow:           13,
-    rsiBullMin:        45, rsiBullMax: 75,  // widened — catches momentum before overbought
-    rsiBearMin:        25, rsiBearMax: 55,  // widened — catches momentum before oversold
-    vwapMaxDistPct:    2.5,                 // loosened from 0.8 — crypto moves >1% from VWAP routinely
-    slAtrMult:         1.0,
-    tpAtrMult:         2.0,                 // 2:1 RR
-    trendStrengthMin:  0.05,
-    label:             "Scalp 5m — EMA(5/13)",
+    timeframe:      "5m",
+    emaFast:        8,
+    emaSlow:        13,
+    rsiBullMin:     40, rsiBullMax: 80,
+    rsiBearMin:     20, rsiBearMax: 60,
+    vwapMaxDistPct: 3.0,
+    slAtrMult:      1.0,
+    tpAtrMult:      2.0,
+    label:          "Scalp 5m — EMA(8/13)",
   },
   intraday: {
-    timeframe:         "15m",
-    emaFast:           9,
-    emaSlow:           21,
-    rsiBullMin:        42, rsiBullMax: 72,  // widened
-    rsiBearMin:        28, rsiBearMax: 58,  // widened
-    vwapMaxDistPct:    3.5,                 // loosened from 2.0
-    slAtrMult:         1.5,
-    tpAtrMult:         4.5,                 // 3:1 RR
-    trendStrengthMin:  0.10,
-    label:             "Intraday 15m — EMA(9/21)",
+    timeframe:      "15m",
+    emaFast:        9,
+    emaSlow:        21,
+    rsiBullMin:     38, rsiBullMax: 78,
+    rsiBearMin:     22, rsiBearMax: 62,
+    vwapMaxDistPct: 4.0,
+    slAtrMult:      1.5,
+    tpAtrMult:      4.5,
+    label:          "Intraday 15m — EMA(9/21)",
   },
 };
 
@@ -343,17 +341,15 @@ function runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params, trendBias)
 
   console.log("\n── Safety Check ─────────────────────────────────────────\n");
 
-  const bullishEMA       = emaFast > emaSlow;
-  const trendStrengthPct = Math.abs(emaFast - emaSlow) / price * 100;
-  const distFromVWAP     = vwap ? Math.abs((price - vwap) / vwap) * 100 : 999;
+  const bullishEMA   = emaFast > emaSlow;
+  const distFromVWAP = vwap ? Math.abs((price - vwap) / vwap) * 100 : 999;
 
-  // Critical — block if either fails
-  crit("EMA direction established (not flat)", bullishEMA || emaFast < emaSlow);
-  crit(`Trend strength >= ${params.trendStrengthMin}% EMA separation`, trendStrengthPct >= params.trendStrengthMin);
+  // Critical — EMA must have a direction (not perfectly flat)
+  crit("EMA direction established", emaFast !== emaSlow);
 
   const criticalPass = critical.every(r => r.pass);
   if (!criticalPass) {
-    console.log(`  Bias: CHOPPY — EMA spread ${trendStrengthPct.toFixed(3)}%. No trade.\n`);
+    console.log(`  Bias: FLAT — EMAs equal. No trade.\n`);
     return { results: [...critical, ...scored], criticalPass: false, score: 0, bias: "neutral" };
   }
 
@@ -675,7 +671,8 @@ async function runSymbol(symbol, log) {
   const rsi14      = calcRSI(closes, 14);
   const trendBias  = await getTrendBias(symbol);
 
-  console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI: ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
+  const emaSep = Math.abs(emaFast - emaSlow) / price * 100;
+  console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | Sep: ${emaSep.toFixed(3)}% | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI: ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
   if (rsi14 === null) { console.log(`  ⚠️  Not enough candles for RSI — skipping.`); return; }
 
