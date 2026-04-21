@@ -38,26 +38,26 @@ const CONFIG = {
 // Strategy parameter presets
 const STRATEGY_PARAMS = {
   scalp: {
-    timeframe:      "5m",
-    emaFast:        8,
-    emaSlow:        13,
-    rsiBullMin:     40, rsiBullMax: 80,
-    rsiBearMin:     20, rsiBearMax: 60,
-    vwapMaxDistPct: 3.0,
-    slAtrMult:      1.0,
-    tpAtrMult:      2.0,
-    label:          "Scalp 5m — EMA(8/13)",
+    timeframe:   "5m",
+    emaFast:     8,
+    emaSlow:     13,
+    rsiPeriod:   7,
+    rsiBullMin:  40, rsiBullMax: 80,
+    rsiBearMin:  20, rsiBearMax: 60,
+    slAtrMult:   1.0,
+    tpAtrMult:   2.0,
+    label:       "Scalp 5m — EMA(8/13) RSI(7)",
   },
   intraday: {
-    timeframe:      "15m",
-    emaFast:        9,
-    emaSlow:        21,
-    rsiBullMin:     38, rsiBullMax: 78,
-    rsiBearMin:     22, rsiBearMax: 62,
-    vwapMaxDistPct: 4.0,
-    slAtrMult:      1.5,
-    tpAtrMult:      4.5,
-    label:          "Intraday 15m — EMA(9/21)",
+    timeframe:   "15m",
+    emaFast:     9,
+    emaSlow:     21,
+    rsiPeriod:   14,
+    rsiBullMin:  38, rsiBullMax: 78,
+    rsiBearMin:  22, rsiBearMax: 62,
+    slAtrMult:   1.5,
+    tpAtrMult:   4.5,
+    label:       "Intraday 15m — EMA(9/21) RSI(14)",
   },
 };
 
@@ -341,8 +341,7 @@ function runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params, trendBias)
 
   console.log("\n── Safety Check ─────────────────────────────────────────\n");
 
-  const bullishEMA   = emaFast > emaSlow;
-  const distFromVWAP = vwap ? Math.abs((price - vwap) / vwap) * 100 : 999;
+  const bullishEMA = emaFast > emaSlow;
 
   // Critical — EMA must have a direction (not perfectly flat)
   crit("EMA direction established", emaFast !== emaSlow);
@@ -373,8 +372,7 @@ function runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params, trendBias)
 
   if (vwap) {
     const vwapAligned = goLong ? price > vwap : price < vwap;
-    bonus(`VWAP aligned + within ${params.vwapMaxDistPct}% (dist: ${distFromVWAP.toFixed(2)}%)`,
-      vwapAligned && distFromVWAP < params.vwapMaxDistPct);
+    bonus(`VWAP direction aligned (${goLong ? "price > VWAP" : "price < VWAP"})`, vwapAligned);
   }
 
   const score = scored.filter(r => r.pass).length;
@@ -668,11 +666,11 @@ async function runSymbol(symbol, log) {
   const emaFast    = calcEMA(closes, params.emaFast);
   const emaSlow    = calcEMA(closes, params.emaSlow);
   const vwap       = calcVWAP(candles);
-  const rsi14      = calcRSI(closes, 14);
+  const rsi14      = calcRSI(closes, params.rsiPeriod);
   const trendBias  = await getTrendBias(symbol);
 
   const emaSep = Math.abs(emaFast - emaSlow) / price * 100;
-  console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | Sep: ${emaSep.toFixed(3)}% | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI: ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
+  console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | Sep: ${emaSep.toFixed(3)}% | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI(${params.rsiPeriod}): ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
   if (rsi14 === null) { console.log(`  ⚠️  Not enough candles for RSI — skipping.`); return; }
 
