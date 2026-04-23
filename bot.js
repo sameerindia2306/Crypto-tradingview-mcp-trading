@@ -61,9 +61,9 @@ const STRATEGY_PARAMS = {
   },
 };
 
-const LOG_FILE       = "safety-check-log.json";
-const POSITIONS_FILE = "open-positions.json";
-const WATCHLIST_FILE = "watchlist.json";
+const LOG_FILE       = process.env.SAFETY_LOG_PATH    || "safety-check-log.json";
+const POSITIONS_FILE = process.env.POSITIONS_FILE_PATH || "open-positions.json";
+const WATCHLIST_FILE = process.env.WATCHLIST_FILE_PATH || "watchlist.json";
 
 // ─── Weekly Pair Scanner ──────────────────────────────────────────────────────
 
