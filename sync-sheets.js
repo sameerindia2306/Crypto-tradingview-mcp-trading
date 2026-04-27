@@ -8,6 +8,41 @@ const CSV_FILE   = process.env.TRADE_LOG_PATH || "trades.csv";
 
 const TABS = ["All Trades", "CRYPTO", "FOREX", "GOLD", "TECH"];
 
+function groupByDayWithSummaries(dataRows) {
+  if (!dataRows.length) return [];
+  const EMPTY_ROW = new Array(18).fill("");
+  const result    = [];
+
+  const byDate = new Map();
+  for (const row of dataRows) {
+    const date = row[0] || "unknown";
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(row);
+  }
+
+  for (const [date, rows] of byDate) {
+    result.push(...rows);
+
+    const wins     = rows.filter(r => (r[12] || "").toUpperCase() === "WIN").length;
+    const losses   = rows.filter(r => (r[12] || "").toUpperCase() === "LOSS").length;
+    const blocked  = rows.filter(r => (r[12] || "").toUpperCase() === "BLOCKED").length;
+    const executed = rows.filter(r => ["PAPER", "LIVE"].includes((r[11] || "").toUpperCase())).length;
+    const closed   = rows.filter(r => ["WIN", "LOSS"].includes((r[12] || "").toUpperCase()));
+    const totalPnL = closed.reduce((sum, r) => sum + (parseFloat(r[15]) || 0), 0);
+    const totalFees= rows.reduce((sum, r) => sum + (parseFloat(r[8]) || 0), 0);
+    const pnlStr   = closed.length ? (totalPnL >= 0 ? "+" : "") + totalPnL.toFixed(2) : "";
+
+    result.push([
+      date, "DAY SUMMARY", "", "── DAILY P&L ──", "", "", "", "",
+      totalFees > 0 ? totalFees.toFixed(4) : "",
+      "", "", "SUMMARY", "SUMMARY", "", "", pnlStr, "",
+      `${wins}W ${losses}L | ${executed} executed | ${blocked} blocked`,
+    ]);
+    result.push(EMPTY_ROW);
+  }
+  return result;
+}
+
 function getCategory(symbol) {
   const s = (symbol || "").toUpperCase().trim();
   if (s === "XAUUSD" || s === "XAUUSDT") return "GOLD";
@@ -78,7 +113,28 @@ function buildFormatRequests(sheetId, rows) {
   };
 
   for (let i = 1; i < rows.length; i++) {
-    const status = (rows[i][12] || "").toUpperCase();
+    const mode    = (rows[i][11] || "").toUpperCase();
+    const status  = (rows[i][12] || "").toUpperCase();
+    const isBlank = rows[i].every(c => !c);
+
+    if (isBlank) continue; // spacer row — no formatting
+
+    if (mode === "SUMMARY") {
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: i, endRowIndex: i + 1 },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.216, green: 0.278, blue: 0.310 }, // #37474F slate
+              textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            },
+          },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      });
+      continue;
+    }
+
     const color = colorMap[status];
     if (!color) continue;
     requests.push({
@@ -155,11 +211,11 @@ export async function syncToSheets() {
 
   // Write data to each tab
   const tabData = {
-    "All Trades": allRows,
-    CRYPTO: byCategory.CRYPTO.length ? [headers, ...byCategory.CRYPTO] : [headers],
-    FOREX:  byCategory.FOREX.length  ? [headers, ...byCategory.FOREX]  : [headers],
-    GOLD:   byCategory.GOLD.length   ? [headers, ...byCategory.GOLD]   : [headers],
-    TECH:   byCategory.TECH.length   ? [headers, ...byCategory.TECH]   : [headers],
+    "All Trades": [headers, ...groupByDayWithSummaries(dataRows)],
+    CRYPTO: [headers, ...groupByDayWithSummaries(byCategory.CRYPTO)],
+    FOREX:  [headers, ...groupByDayWithSummaries(byCategory.FOREX)],
+    GOLD:   [headers, ...groupByDayWithSummaries(byCategory.GOLD)],
+    TECH:   [headers, ...groupByDayWithSummaries(byCategory.TECH)],
   };
 
   for (const [tab, rows] of Object.entries(tabData)) {

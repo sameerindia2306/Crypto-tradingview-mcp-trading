@@ -535,7 +535,7 @@ function writeTradeCsv(logEntry) {
     netAmount,
     orderId,
     mode,
-    logEntry.allPass ? "OPEN" : "BLOCKED",
+    logEntry.criticalPass ? "OPEN" : "BLOCKED",
     "", // Exit Price — filled when position closes
     "", // Exit Time
     "", // P&L USD
@@ -615,6 +615,17 @@ function generateTaxSummary() {
   console.log("─────────────────────────────────────────────────────────\n");
 }
 
+// ─── Skip/Error CSV logging ───────────────────────────────────────────────────
+
+function writeSkipCsv(symbol, reason) {
+  const now  = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const time = now.toISOString().slice(11, 19);
+  const row  = [date, time, "Binance", symbol, "", "", "", "", "", "", "SKIP", "SKIP", "SKIP", "", "", "", "", `"${reason}"`].join(",");
+  if (!existsSync(CSV_FILE)) writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
+  appendFileSync(CSV_FILE, row + "\n");
+}
+
 // ─── Per-symbol run ──────────────────────────────────────────────────────────
 
 async function runSymbol(symbol, log) {
@@ -634,6 +645,7 @@ async function runSymbol(symbol, log) {
     candles = await fetchCandles(symbol, params.timeframe, 500);
   } catch (err) {
     console.log(`  ⚠️  Could not fetch data for ${symbol}: ${err.message}`);
+    writeSkipCsv(symbol, `Fetch error: ${err.message}`);
     return;
   }
 
@@ -658,7 +670,11 @@ async function runSymbol(symbol, log) {
   const atr    = calcATR(candles, 14);
   console.log(`  Price: $${price.toFixed(4)} | ATR(14): ${atr ? "$" + atr.toFixed(4) : "N/A"}`);
 
-  if (!atr) { console.log(`  ⚠️  Not enough data for ATR — skipping.`); return; }
+  if (!atr) {
+    console.log(`  ⚠️  Not enough data for ATR — skipping.`);
+    writeSkipCsv(symbol, "Insufficient data for ATR");
+    return;
+  }
 
   const closed = checkAndClosePositions(symbol, price);
   for (const c of closed) writeCloseCsv(c);
@@ -672,7 +688,11 @@ async function runSymbol(symbol, log) {
   const emaSep = Math.abs(emaFast - emaSlow) / price * 100;
   console.log(`  EMA(${params.emaFast}): $${emaFast.toFixed(4)} | EMA(${params.emaSlow}): $${emaSlow.toFixed(4)} | Sep: ${emaSep.toFixed(3)}% | VWAP: ${vwap ? "$" + vwap.toFixed(4) : "N/A"} | RSI(${params.rsiPeriod}): ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
-  if (rsi14 === null) { console.log(`  ⚠️  Not enough candles for RSI — skipping.`); return; }
+  if (rsi14 === null) {
+    console.log(`  ⚠️  Not enough candles for RSI — skipping.`);
+    writeSkipCsv(symbol, "Insufficient candles for RSI");
+    return;
+  }
 
   const { results, criticalPass, score, bias } = runSafetyCheck(price, emaFast, emaSlow, vwap, rsi14, params, trendBias);
   const side       = bias === "bearish" ? "sell" : "buy";
@@ -722,6 +742,9 @@ async function runSymbol(symbol, log) {
 
   log.trades.push(logEntry);
   writeTradeCsv(logEntry);
+
+  // Sync to Sheets after each trade so Railway restarts don't lose the cycle's data
+  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets sync failed: ${err.message}`));
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -763,7 +786,6 @@ async function run() {
   console.log(`\nDecision log saved → ${LOG_FILE}`);
   console.log(`Tax record saved → ${CSV_FILE}`);
   await exportToExcel().catch(err => console.log(`  ⚠️  Excel export failed: ${err.message}`));
-  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets sync failed: ${err.message}`));
   console.log("═══════════════════════════════════════════════════════════\n");
 }
 
