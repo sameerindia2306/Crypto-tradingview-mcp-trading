@@ -525,7 +525,7 @@ function writeTradeCsv(logEntry) {
   const row = [
     date,
     time,
-    "Binance",
+    logEntry.paperTrading ? "PAPER (BitGet prices)" : "Binance",
     logEntry.symbol,
     side,
     quantity,
@@ -559,7 +559,7 @@ function writeCloseCsv(closed) {
   const row = [
     openedAt.toISOString().slice(0, 10),
     openedAt.toISOString().slice(11, 19),
-    "Binance",
+    closed.paperTrading ? "PAPER (BitGet prices)" : "Binance",
     closed.symbol,
     closed.side.toUpperCase(),
     closed.quantity.toFixed(6),
