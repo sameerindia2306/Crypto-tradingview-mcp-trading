@@ -792,10 +792,40 @@ async function run() {
 if (process.argv.includes("--tax-summary")) {
   generateTaxSummary();
 } else {
-  const RUN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  const RUN_INTERVAL_MS = 5 * 60 * 1000;
+
+  async function startup() {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("  Claude Crypto Bot — STARTING UP");
+    console.log(`  ${new Date().toISOString()}`);
+    console.log("─── Environment Check ─────────────────────────────────────");
+    console.log(`  TWELVE_DATA_API_KEY   : ${process.env.TWELVE_DATA_API_KEY  ? "✅ SET" : "❌ MISSING"}`);
+    console.log(`  GOOGLE_SHEET_ID       : ${process.env.GOOGLE_SHEET_ID      ? "✅ SET" : "❌ MISSING"}`);
+    console.log(`  GOOGLE_CLIENT_EMAIL   : ${process.env.GOOGLE_CLIENT_EMAIL  ? "✅ SET" : "❌ MISSING"}`);
+    console.log(`  GOOGLE_PRIVATE_KEY_B64: ${process.env.GOOGLE_PRIVATE_KEY_B64 ? "✅ SET" : "❌ MISSING"}`);
+    console.log(`  PAPER_TRADING         : ${CONFIG.paperTrading ? "YES (safe)" : "NO — LIVE TRADES"}`);
+    console.log(`  SYMBOLS               : ${CONFIG.symbols.join(", ")}`);
+    console.log(`  MAX_TRADES_PER_DAY    : ${CONFIG.maxTradesPerDay}`);
+    console.log("═══════════════════════════════════════════════════════════");
+
+    if (process.env.GOOGLE_SHEET_ID) {
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout after 15s")), 15000));
+      Promise.race([syncToSheets(), timeout])
+        .then(() => console.log("  Google Sheets         : ✅ Connected"))
+        .catch(err => console.log(`  Google Sheets         : ❌ FAILED — ${err.message}`));
+    }
+  }
+
+  let lastHeartbeatHour = -1;
   async function loop() {
+    const h = new Date().getUTCHours();
+    if (h !== lastHeartbeatHour) {
+      lastHeartbeatHour = h;
+      console.log(`[HEARTBEAT ${new Date().toISOString()}] Bot alive | UTC ${h}h | Day: ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getUTCDay()]}`);
+    }
     await run().catch(err => console.error("Bot cycle error:", err));
     setTimeout(loop, RUN_INTERVAL_MS);
   }
-  loop();
+
+  startup().then(() => loop());
 }
